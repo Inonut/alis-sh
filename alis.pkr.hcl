@@ -34,7 +34,7 @@ build {
   sources = ["sources.virtualbox-iso.arch-linux"]
 
   post-processor "vagrant" {
-    output = "${local.output_box}/alis-${arch_version}.box"
+    output = "${local.output_box}/alis-${local.arch_version}.box"
   }
 
   post-processor "shell-local" {
