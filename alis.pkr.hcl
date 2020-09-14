@@ -8,8 +8,8 @@ locals {
 source "virtualbox-iso" "arch-linux" {
   guest_os_type = "ArchLinux_64"
   guest_additions_mode = "disable"
-  headless = true
-  http_directory = "srv"
+  headless = false
+  http_directory = "."
   vboxmanage = [
     ["modifyvm", "{{.Name}}", "--memory", "2048"],
     ["modifyvm", "{{.Name}}", "--vram", "128"],
@@ -25,8 +25,11 @@ source "virtualbox-iso" "arch-linux" {
   boot_wait = "30s"
   shutdown_command = "sudo systemctl poweroff"
   boot_command = [
-    "/usr/bin/curl -O http://{{ .HTTPIP }}:{{ .HTTPPort }}/enable-ssh.sh<enter>",
-    "/usr/bin/bash ./enable-ssh.sh ${local.ssh_username} ${local.ssh_password}<enter>"
+    "/usr/bin/curl -O http://{{ .HTTPIP }}:{{ .HTTPPort }}/alis.sh<enter>",
+    "chmod +x ./alis.sh<enter>",
+    "./alis.sh<enter><wait1>",
+    "/usr/bin/curl -O http://{{ .HTTPIP }}:{{ .HTTPPort }}/srv/enable-ssh.sh<enter>",
+    "/usr/bin/bash ./enable-ssh.sh ${local.ssh_username} ${local.ssh_password}<enter>",
   ]
 }
 
@@ -34,10 +37,6 @@ build {
   sources = ["sources.virtualbox-iso.arch-linux"]
 
   post-processor "vagrant" {
-    output = "${local.output_box}/alis-${local.arch_version}.box"
-  }
-
-  post-processor "shell-local" {
-    inline = ["echo 'Template build complete'"]
+    output = "${local.output_box}/alis-{{ .Provider }}-${local.arch_version}.box"
   }
 }
