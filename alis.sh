@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -e
-set -x
+#set -x
 
 DEVICE="/dev/sda"
 SWAP_SIZE="4096"
@@ -16,18 +16,18 @@ PARTITION_BOOT=""
 PARTITION_ROOT=""
 
 function last_partition_name() {
-    local DEVICE=$1
-    local last_partition=$(fdisk "$DEVICE" -l | tail -1)
-    local last_partition_tokens=( $last_partition )
-    local last_partition_name="${last_partition_tokens[0]}"
+  local DEVICE=$1
+  local last_partition=$(fdisk "$DEVICE" -l | tail -1)
+  local last_partition_tokens=($last_partition)
+  local last_partition_name="${last_partition_tokens[0]}"
 
-    echo $last_partition_name
+  echo $last_partition_name
 }
 
 function last_partition_end_mb() {
   local DEVICE="$1"
   local last_partition=$(parted "$DEVICE" unit MB print | tail -2)
-  local last_partition_tokens=( $last_partition )
+  local last_partition_tokens=($last_partition)
   local last_partition_memory="0%"
   if [[ "${last_partition_tokens[2]}" == *MB ]]; then
     last_partition_memory="${last_partition_tokens[2]}"
@@ -36,106 +36,150 @@ function last_partition_end_mb() {
   echo $last_partition_memory
 }
 
-function packages_aur() {
-  arch-chroot /mnt sed -i 's/%wheel ALL=(ALL) ALL/%wheel ALL=(ALL) NOPASSWD: ALL/' /etc/sudoers
+function install_arch_uefi() {
+  local DEVICE=$1
 
-  arch-chroot /mnt pacman -Syu --noconfirm --needed git
+  loadkeys us
+  timedatectl set-ntp true
 
-  case "$1" in
-    "aurman" )
-      arch-chroot /mnt bash -c "echo -e \"$USER_PASSWORD\n$USER_PASSWORD\n$USER_PASSWORD\n$USER_PASSWORD\n\" | su $USER_NAME -c \"cd /home/$USER_NAME && git clone https://aur.archlinux.org/$1.git && gpg --recv-key 465022E743D71E39 && (cd $1 && makepkg -si --noconfirm) && rm -rf $1\""
-      ;;
-    "yay" | *)
-      arch-chroot /mnt bash -c "echo -e \"$USER_PASSWORD\n$USER_PASSWORD\n$USER_PASSWORD\n$USER_PASSWORD\n\" | su $USER_NAME -c \"cd /home/$USER_NAME && git clone https://aur.archlinux.org/$1.git && (cd $1 && makepkg -si --noconfirm) && rm -rf $1\""
-      ;;
-  esac
+  # only on ping -c 1, packer gets stuck if -c 5
+  ping -c 1 -i 2 -W 5 -w 30 "mirrors.kernel.org"
+  if [ $? -ne 0 ]; then
+    echo "Network ping check failed. Cannot continue."
+    exit
+  fi
 
-  arch-chroot /mnt sed -i 's/%wheel ALL=(ALL) NOPASSWD: ALL/%wheel ALL=(ALL) ALL/' /etc/sudoers
+  sgdisk --zap-all $DEVICE
+  wipefs -a $DEVICE
+
+  parted $DEVICE mklabel gpt
+  parted $DEVICE mkpart primary 0% 512MiB
+  parted $DEVICE set 1 boot on
+  parted $DEVICE set 1 esp on # this flag identifies a UEFI System Partition. On GPT it is an alias for boot.
+  PARTITION_BOOT=$(last_partition_name $DEVICE)
+  parted $DEVICE mkpart primary 512MiB 100%
+  PARTITION_ROOT=$(last_partition_name $DEVICE)
+
+  mkfs.fat -n ESP -F32 $PARTITION_BOOT
+  mkfs.ext4 -L root $PARTITION_ROOT
+
+  mount -o $PARTITION_OPTIONS $PARTITION_ROOT /mnt
+  mkdir -p /mnt$BOOT_MOUNT
+  mount -o $PARTITION_OPTIONS $PARTITION_BOOT /mnt$BOOT_MOUNT
+
+  dd if=/dev/zero of=/mnt$SWAPFILE bs=1M count=$SWAP_SIZE status=progress
+  chmod 600 /mnt$SWAPFILE
+  mkswap /mnt$SWAPFILE
+
+  pacman -Sy --noconfirm reflector
+  reflector --country 'Romania' --latest 25 --age 24 --protocol https --completion-percent 100 --sort rate --save /etc/pacman.d/mirrorlist
+
+  VIRTUALBOX=""
+  if [ -n "$(lspci | grep -i virtualbox)" ]; then
+    VIRTUALBOX="virtualbox-guest-utils virtualbox-guest-dkms intel-ucode"
+  fi
+  pacstrap /mnt base base-devel linux linux-headers networkmanager efibootmgr grub $VIRTUALBOX
+
+  genfstab -U /mnt >>/mnt/etc/fstab
+
+  echo "# swap" >>/mnt/etc/fstab
+  echo "$SWAPFILE none swap defaults 0 0" >>/mnt/etc/fstab
+  echo "" >>/mnt/etc/fstab
+
+  arch-chroot /mnt systemctl enable fstrim.timer
+
+  arch-chroot /mnt ln -s -f /usr/share/zoneinfo/Europe/Bucharest /etc/localtime
+  arch-chroot /mnt hwclock --systohc
+  sed -i "s/#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/" /mnt/etc/locale.gen
+  arch-chroot /mnt locale-gen
+  echo -e "LANG=en_US.UTF-8" >>/mnt/etc/locale.conf
+  echo -e "KEYMAP=us" >/mnt/etc/vconsole.conf
+  echo $HOSTNAME >/mnt/etc/hostname
+
+  printf "$ROOT_PASSWORD\n$ROOT_PASSWORD" | arch-chroot /mnt passwd
+
+  arch-chroot /mnt mkinitcpio -P
+
+  arch-chroot /mnt systemctl enable NetworkManager.service
+
+  arch-chroot /mnt useradd -m -G wheel,storage,optical -s /bin/bash $USER_NAME
+  printf "$USER_PASSWORD\n$USER_PASSWORD" | arch-chroot /mnt passwd $USER_NAME
+  sed -i "s/# %wheel ALL=(ALL) ALL/%wheel ALL=(ALL) ALL/" /mnt/etc/sudoers
+
+  sed -i 's/GRUB_DEFAULT=0/GRUB_DEFAULT=saved/' /mnt/etc/default/grub
+  sed -i "s/#GRUB_SAVEDEFAULT=\"true\"/GRUB_SAVEDEFAULT=\"true\"/" /mnt/etc/default/grub
+  arch-chroot /mnt grub-install --target=x86_64-efi --bootloader-id=grub --efi-directory=$BOOT_MOUNT --recheck
+  arch-chroot /mnt grub-mkconfig -o "/boot/grub/grub.cfg"
+  if [ -n "$(lspci | grep -i virtualbox)" ]; then
+    echo -n "\EFI\grub\grubx64.efi" >"/mnt$BOOT_MOUNT/startup.nsh"
+  fi
+
+  #arch-chroot /mnt pacman -Syu --noconfirm --needed xf86-video-intel mesa gnome
+  #arch-chroot /mnt systemctl enable gdm.service
+  #
+  #packages_aur yay
+
+  umount -R /mnt
 }
 
-loadkeys us
-timedatectl set-ntp true
 
-# only on ping -c 1, packer gets stuck if -c 5
-ping -c 1 -i 2 -W 5 -w 30 "mirrors.kernel.org"
-if [ $? -ne 0 ]; then
-  echo "Network ping check failed. Cannot continue."
-  exit
-fi
+DEFAULT_OPTIONS='
+DEVICE="/dev/sda"
+SWAP_SIZE="4096"
+HOSTNAME="archlinux"
+ROOT_PASSWORD="archlinux"
+USER_NAME=""
+USER_PASSWORD=""
+BOOT_MOUNT="/boot/efi"
+'
 
-parted $DEVICE mklabel gpt
-parted $DEVICE mkpart primary 0% 512MiB
-parted $DEVICE set 1 boot on
-parted $DEVICE set 1 esp on
-PARTITION_BOOT=$(last_partition_name $DEVICE)
-parted $DEVICE mkpart primary 512MiB 100%
-PARTITION_ROOT=$(last_partition_name $DEVICE)
 
-mkfs.fat -n ESP -F32 $PARTITION_BOOT
-mkfs.ext4 -L root $PARTITION_ROOT
+usage="
 
-mount -o $PARTITION_OPTIONS $PARTITION_ROOT /mnt
-mkdir -p /mnt$BOOT_MOUNT
-mount -o $PARTITION_OPTIONS $PARTITION_BOOT /mnt$BOOT_MOUNT
+$(basename "$0") -- script for installing Arch Linux and configure applications
 
-dd if=/dev/zero of=/mnt$SWAPFILE bs=1M count=$SWAP_SIZE status=progress
-chmod 600 /mnt$SWAPFILE
-mkswap /mnt$SWAPFILE
+options:
+    --help                Show this help text
+    --generate-defaults   Generate file alis.conf (!!! DO THIS FIRST !!!)
+    --install-arch-uefi   Install Arch Linux in uefi mode, this erase all of your data
 
-pacman -Sy --noconfirm reflector
-reflector --country 'Romania' --latest 25 --age 24 --protocol https --completion-percent 100 --sort rate --save /etc/pacman.d/mirrorlist
+"
 
-pacstrap /mnt base base-devel linux linux-headers networkmanager xdg-user-dirs efibootmgr grub dosfstools virtualbox-guest-utils virtualbox-guest-dkms intel-ucode
+SHORT="hv"
+LONG=install-arch-uefi,generate-defaults,help
 
-genfstab -U /mnt >> /mnt/etc/fstab
+OPTS=$(getopt --options $SHORT --long $LONG --name "$0" -- "$@")
 
-echo "# swap" >> /mnt/etc/fstab
-echo "$SWAPFILE none swap defaults 0 0" >> /mnt/etc/fstab
-echo "" >> /mnt/etc/fstab
+if [ $? != 0 ] ; then echo "Failed to parse options...exiting." >&2 ; exit 1 ; fi
 
-#sed -i 's/relatime/noatime/' /mnt/etc/fstab
-arch-chroot /mnt systemctl enable fstrim.timer
+eval set -- "$OPTS"
 
-arch-chroot /mnt ln -s -f /usr/share/zoneinfo/Europe/Bucharest /etc/localtime
-arch-chroot /mnt hwclock --systohc
-LOCALES=(en_US.UTF-8 UTF-8 ro_RO.UTF-8 UTF-8)
-LOCALE_CONF=(LANG=en_US.UTF-8)
-for LOCALE in "${LOCALES[@]}"; do
-  sed -i "s/#$LOCALE/$LOCALE/" /etc/locale.gen
-  sed -i "s/#$LOCALE/$LOCALE/" /mnt/etc/locale.gen
+while true ; do
+  case "$1" in
+    -h | --help )
+      echo "$usage"
+      exit
+      ;;
+    -v )
+      set -x
+      shift
+      ;;
+    --generate-defaults )
+      echo "$DEFAULT_OPTIONS" > alis.conf
+      echo "File alis.conf was created!"
+      exit
+      ;;
+    -- )
+      if [ ! -f alis.conf ]; then
+        echo -e "Please run with --generate-defaults option. \nDo needed changes in alis.conf before continue. \nAlso run with --help for more details."
+      fi
+      shift
+      break
+      ;;
+    *)
+      echo "Internal error!"
+      exit 1
+      ;;
+  esac
 done
-locale-gen
-arch-chroot /mnt locale-gen
-for VARIABLE in "${LOCALE_CONF[@]}"; do
-  localectl set-locale "$VARIABLE"
-  echo -e "$VARIABLE" >> /mnt/etc/locale.conf
-done
-echo -e "KEYMAP=us" > /mnt/etc/vconsole.conf
-echo $HOSTNAME > /mnt/etc/hostname
 
-printf "$ROOT_PASSWORD\n$ROOT_PASSWORD" | arch-chroot /mnt passwd
-
-arch-chroot /mnt mkinitcpio -P
-
-arch-chroot /mnt systemctl enable NetworkManager.service
-
-arch-chroot /mnt useradd -m -G wheel,storage,optical -s /bin/bash $USER_NAME
-printf "$USER_PASSWORD\n$USER_PASSWORD" | arch-chroot /mnt passwd $USER_NAME
-arch-chroot /mnt sed -i 's/# %wheel ALL=(ALL) ALL/%wheel ALL=(ALL) ALL/' /etc/sudoers
-
-arch-chroot /mnt sed -i 's/GRUB_DEFAULT=0/GRUB_DEFAULT=saved/' /etc/default/grub
-arch-chroot /mnt sed -i 's/#GRUB_SAVEDEFAULT="true"/GRUB_SAVEDEFAULT="true"/' /etc/default/grub
-arch-chroot /mnt sed -i -E 's/GRUB_CMDLINE_LINUX_DEFAULT="(.*) quiet"/GRUB_CMDLINE_LINUX_DEFAULT="\1"/' /etc/default/grub
-echo "" >> /mnt/etc/default/grub
-echo "# alis" >> /mnt/etc/default/grub
-echo "GRUB_DISABLE_SUBMENU=y" >> /mnt/etc/default/grub
-arch-chroot /mnt grub-install --target=x86_64-efi --bootloader-id=grub --efi-directory=$BOOT_MOUNT --recheck
-arch-chroot /mnt grub-mkconfig -o "/boot/grub/grub.cfg"
-echo -n "\EFI\grub\grubx64.efi" > "/mnt$BOOT_MOUNT/startup.nsh"
-
-#arch-chroot /mnt pacman -Syu --noconfirm --needed xf86-video-intel mesa gnome
-#arch-chroot /mnt systemctl enable gdm.service
-#
-#packages_aur yay
-
-umount -R /mnt

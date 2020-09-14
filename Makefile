@@ -3,4 +3,5 @@ build-box:
 
 test-vagrant:
 	vagrant box add output_box/alis-virtualbox-*.box --force --name alis
+	vagrant destroy -f
 	vagrant up
