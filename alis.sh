@@ -1,19 +1,7 @@
 #!/usr/bin/env bash
 set -e
-#set -x
 
-DEVICE="/dev/sda"
-SWAP_SIZE="4096"
-HOSTNAME="archlinux"
-ROOT_PASSWORD="archlinux"
-USER_NAME="dragos"
-USER_PASSWORD="archlinux"
-
-BOOT_MOUNT="/boot/efi"
-SWAPFILE="/swapfile"
-PARTITION_OPTIONS="defaults,noatime"
-PARTITION_BOOT=""
-PARTITION_ROOT=""
+WARNING="Please run with --generate-defaults option. \nDo needed changes in alis.conf before continue. \nAlso run with --help for more details."
 
 function last_partition_name() {
   local DEVICE=$1
@@ -36,8 +24,35 @@ function last_partition_end_mb() {
   echo $last_partition_memory
 }
 
+function yay() {
+  local PASS=$1
+  printf "%s\n" "$PASS" | sudo --stdin pacman -S --noconfirm git
+  git clone https://aur.archlinux.org/yay.git
+  cd yay
+  printf "%s\n" "$PASS" | makepkg -si --noconfirm
+  cd ..
+  rm -rf yay
+}
+
 function install_arch_uefi() {
-  local DEVICE=$1
+  if [ ! -f alis.conf ]; then
+    echo -e $WARNING
+    exit 1
+  else
+
+    for line in `cat alis.conf`
+    do
+      if [ -n "$line" ]; then
+        eval "local $line"
+      fi
+    done
+
+    local FEATURES=$1
+    local SWAPFILE="/swapfile"
+    local PARTITION_OPTIONS="defaults,noatime"
+    local PARTITION_BOOT=""
+    local PARTITION_ROOT=""
+  fi
 
   loadkeys us
   timedatectl set-ntp true
@@ -114,10 +129,10 @@ function install_arch_uefi() {
     echo -n "\EFI\grub\grubx64.efi" >"/mnt$BOOT_MOUNT/startup.nsh"
   fi
 
-  #arch-chroot /mnt pacman -Syu --noconfirm --needed xf86-video-intel mesa gnome
-  #arch-chroot /mnt systemctl enable gdm.service
-  #
-  #packages_aur yay
+  mv alis.sh /mnt/home/$USER_NAME
+  arch-chroot /mnt sed -i 's/%wheel ALL=(ALL) ALL/%wheel ALL=(ALL) NOPASSWD: ALL/' /etc/sudoers
+  arch-chroot /mnt bash -c "echo -e \"$USER_PASSWORD\n\" | su $USER_NAME -c \"cd /home/$USER_NAME && ./alis.sh ${FEATURES[*]}\""
+  arch-chroot /mnt sed -i 's/%wheel ALL=(ALL) NOPASSWD: ALL/%wheel ALL=(ALL) ALL/' /etc/sudoers
 
   umount -R /mnt
 }
@@ -128,58 +143,65 @@ DEVICE="/dev/sda"
 SWAP_SIZE="4096"
 HOSTNAME="archlinux"
 ROOT_PASSWORD="archlinux"
-USER_NAME=""
-USER_PASSWORD=""
+USER_NAME="admin"
+USER_PASSWORD="admin"
 BOOT_MOUNT="/boot/efi"
 '
 
-
 usage="
 
-$(basename "$0") -- script for installing Arch Linux and configure applications
+Script for installing Arch Linux and configure applications
 
 options:
     --help                Show this help text
     --generate-defaults   Generate file alis.conf (!!! DO THIS FIRST !!!)
     --install-arch-uefi   Install Arch Linux in uefi mode, this erase all of your data
+    --all-packages        Install all available packages
+    --yay                 Install yay, tool for installing packages from AUR
 
 "
 
-SHORT="hv"
-LONG=install-arch-uefi,generate-defaults,help
+if [[ "$*" =~ "-v" ]]; then
+  set -x
+fi
 
-OPTS=$(getopt --options $SHORT --long $LONG --name "$0" -- "$@")
+if [[ "$*" =~ "-h" ]] || [[ "$*" =~ "--help" ]]; then
+  echo "$usage"
+  exit 1
+fi
 
-if [ $? != 0 ] ; then echo "Failed to parse options...exiting." >&2 ; exit 1 ; fi
+if [[ "$*" =~ "--generate-defaults" ]]; then
+  echo "$DEFAULT_OPTIONS" > alis.conf
+  echo "File alis.conf was created!"
+  exit 1
+fi
 
-eval set -- "$OPTS"
+if [[ "$*" =~ "--install-arch-uefi" ]]; then
+  FEATURES=()
+  for feature in "$@"
+  do
+    if [ $feature != "--install-arch-uefi" ]; then
+      FEATURES+=($feature)
+    fi
+  done
+  install_arch_uefi ${FEATURES[*]}
+else
+  read -p "Password: " -s password
+  echo ""
 
-while true ; do
-  case "$1" in
-    -h | --help )
-      echo "$usage"
-      exit
-      ;;
-    -v )
-      set -x
-      shift
-      ;;
-    --generate-defaults )
-      echo "$DEFAULT_OPTIONS" > alis.conf
-      echo "File alis.conf was created!"
-      exit
-      ;;
-    -- )
-      if [ ! -f alis.conf ]; then
-        echo -e "Please run with --generate-defaults option. \nDo needed changes in alis.conf before continue. \nAlso run with --help for more details."
-      fi
-      shift
-      break
-      ;;
-    *)
-      echo "Internal error!"
-      exit 1
-      ;;
-  esac
-done
+  FEATURES=()
+  if [[ "$*" =~ "--all-packages" ]]; then
+    FEATURES=(--yay)
+  else
+    FEATURES=$@
+  fi
 
+  for feature in $FEATURES
+  do
+    case "$feature" in
+      --yay )
+        yay $password
+        ;;
+    esac
+  done
+fi
