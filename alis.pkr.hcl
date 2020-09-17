@@ -28,7 +28,7 @@ source "virtualbox-iso" "arch-linux" {
     "/usr/bin/curl -O http://{{ .HTTPIP }}:{{ .HTTPPort }}/alis.sh<enter>",
     "chmod +x ./alis.sh<enter>",
     "./alis.sh --generate-defaults<enter><wait1>",
-    "./alis.sh --install-arch-uefi --all-packages<enter><wait1>",
+    "./alis.sh --install-arch-uefi -v --all-packages<enter><wait1>",
     "/usr/bin/curl -O http://{{ .HTTPIP }}:{{ .HTTPPort }}/srv/enable-ssh.sh<enter>",
     "/usr/bin/bash ./enable-ssh.sh ${local.ssh_username} ${local.ssh_password}<enter>",
   ]

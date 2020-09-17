@@ -4,28 +4,32 @@ set -e
 WARNING="Please run with --generate-defaults option. \nDo needed changes in alis.conf before continue. \nAlso run with --help for more details."
 
 function last_partition_name() {
-  local DEVICE=$1
-  local last_partition=$(fdisk "$DEVICE" -l | tail -1)
-  local last_partition_tokens=($last_partition)
-  local last_partition_name="${last_partition_tokens[0]}"
+  local DEVICE="$1"
+  local last_partition
+  local last_partition_tokens
 
-  echo $last_partition_name
+  last_partition=$(fdisk "$DEVICE" -l | tail -1)
+  IFS=" " read -r -a last_partition_tokens <<< "$last_partition"
+
+  echo "${last_partition_tokens[0]}"
 }
 
 function last_partition_end_mb() {
   local DEVICE="$1"
-  local last_partition=$(parted "$DEVICE" unit MB print | tail -2)
-  local last_partition_tokens=($last_partition)
-  local last_partition_memory="0%"
-  if [[ "${last_partition_tokens[2]}" == *MB ]]; then
-    last_partition_memory="${last_partition_tokens[2]}"
-  fi
+  local last_partition
+  local last_partition_tokens
 
-  echo $last_partition_memory
+  last_partition=$(parted "$DEVICE" unit MB print | tail -2)
+  IFS=" " read -r -a last_partition_tokens <<< "$last_partition"
+  if [[ "${last_partition_tokens[2]}" == *MB ]]; then
+    echo "${last_partition_tokens[2]}"
+  else
+    echo "0%"
+  fi
 }
 
 function yay() {
-  local PASS=$1
+  local PASS="$1"
   printf "%s\n" "$PASS" | sudo --stdin pacman -S --noconfirm git
   git clone https://aur.archlinux.org/yay.git
   cd yay
@@ -36,18 +40,18 @@ function yay() {
 
 function install_arch_uefi() {
   if [ ! -f alis.conf ]; then
-    echo -e $WARNING
+    echo -e "$WARNING"
     exit 1
   else
 
-    for line in `cat alis.conf`
+    while IFS= read -r line
     do
       if [ -n "$line" ]; then
         eval "local $line"
       fi
-    done
+    done < <(grep -v '^ *#' < alis.conf)
 
-    local FEATURES=$1
+    local FEATURES=( "$@" )
     local SWAPFILE="/swapfile"
     local PARTITION_OPTIONS="defaults,noatime"
     local PARTITION_BOOT=""
@@ -58,48 +62,50 @@ function install_arch_uefi() {
   timedatectl set-ntp true
 
   # only on ping -c 1, packer gets stuck if -c 5
-  ping -c 1 -i 2 -W 5 -w 30 "mirrors.kernel.org"
-  if [ $? -ne 0 ]; then
+  local ping
+  ping=$(ping -c 1 -i 2 -W 5 -w 30 "mirrors.kernel.org")
+  if [[ "$ping" == 0 ]]; then
     echo "Network ping check failed. Cannot continue."
     exit
   fi
 
-  sgdisk --zap-all $DEVICE
-  wipefs -a $DEVICE
+  sgdisk --zap-all "$DEVICE"
+  wipefs -a "$DEVICE"
 
-  parted $DEVICE mklabel gpt
-  parted $DEVICE mkpart primary 0% 512MiB
-  parted $DEVICE set 1 boot on
-  parted $DEVICE set 1 esp on # this flag identifies a UEFI System Partition. On GPT it is an alias for boot.
-  PARTITION_BOOT=$(last_partition_name $DEVICE)
-  parted $DEVICE mkpart primary 512MiB 100%
-  PARTITION_ROOT=$(last_partition_name $DEVICE)
+  parted "$DEVICE" mklabel gpt
+  parted "$DEVICE" mkpart primary 0% 512MiB
+  parted "$DEVICE" set 1 boot on
+  parted "$DEVICE" set 1 esp on # this flag identifies a UEFI System Partition. On GPT it is an alias for boot.
+  PARTITION_BOOT=$(last_partition_name "$DEVICE")
+  parted "$DEVICE" mkpart primary 512MiB 100%
+  PARTITION_ROOT=$(last_partition_name "$DEVICE")
 
-  mkfs.fat -n ESP -F32 $PARTITION_BOOT
-  mkfs.ext4 -L root $PARTITION_ROOT
+  mkfs.fat -n ESP -F32 "$PARTITION_BOOT"
+  mkfs.ext4 -L root "$PARTITION_ROOT"
 
-  mount -o $PARTITION_OPTIONS $PARTITION_ROOT /mnt
-  mkdir -p /mnt$BOOT_MOUNT
-  mount -o $PARTITION_OPTIONS $PARTITION_BOOT /mnt$BOOT_MOUNT
+  mount -o $PARTITION_OPTIONS "$PARTITION_ROOT" /mnt
+  mkdir -p /mnt"$BOOT_MOUNT"
+  mount -o $PARTITION_OPTIONS $PARTITION_BOOT /mnt"$BOOT_MOUNT"
 
-  dd if=/dev/zero of=/mnt$SWAPFILE bs=1M count=$SWAP_SIZE status=progress
-  chmod 600 /mnt$SWAPFILE
-  mkswap /mnt$SWAPFILE
+  dd if=/dev/zero of=/mnt"$SWAPFILE" bs=1M count="$SWAP_SIZE" status=progress
+  chmod 600 /mnt"$SWAPFILE"
+  mkswap /mnt"$SWAPFILE"
 
   pacman -Sy --noconfirm reflector
   reflector --country 'Romania' --latest 25 --age 24 --protocol https --completion-percent 100 --sort rate --save /etc/pacman.d/mirrorlist
 
   VIRTUALBOX=""
-  if [ -n "$(lspci | grep -i virtualbox)" ]; then
-    VIRTUALBOX="virtualbox-guest-utils virtualbox-guest-dkms intel-ucode"
+  if lspci | grep -q -i virtualbox; then
+    VIRTUALBOX=(virtualbox-guest-utils virtualbox-guest-dkms intel-ucode)
   fi
-  pacstrap /mnt base base-devel linux linux-headers networkmanager efibootmgr grub $VIRTUALBOX
+  pacstrap /mnt base base-devel linux linux-headers networkmanager efibootmgr grub "${VIRTUALBOX[@]}"
 
-  genfstab -U /mnt >>/mnt/etc/fstab
-
-  echo "# swap" >>/mnt/etc/fstab
-  echo "$SWAPFILE none swap defaults 0 0" >>/mnt/etc/fstab
-  echo "" >>/mnt/etc/fstab
+  {
+    genfstab -U /mnt
+    echo "# swap"
+    echo "$SWAPFILE none swap defaults 0 0"
+    echo ""
+  } >> /mnt/etc/fstab
 
   arch-chroot /mnt systemctl enable fstrim.timer
 
@@ -109,27 +115,27 @@ function install_arch_uefi() {
   arch-chroot /mnt locale-gen
   echo -e "LANG=en_US.UTF-8" >>/mnt/etc/locale.conf
   echo -e "KEYMAP=us" >/mnt/etc/vconsole.conf
-  echo $HOSTNAME >/mnt/etc/hostname
+  echo "$HOSTNAME" >/mnt/etc/hostname
 
-  printf "$ROOT_PASSWORD\n$ROOT_PASSWORD" | arch-chroot /mnt passwd
+  printf "%s\n%s\n" "$ROOT_PASSWORD" "$ROOT_PASSWORD" | arch-chroot /mnt passwd
 
   arch-chroot /mnt mkinitcpio -P
 
   arch-chroot /mnt systemctl enable NetworkManager.service
 
-  arch-chroot /mnt useradd -m -G wheel,storage,optical -s /bin/bash $USER_NAME
-  printf "$USER_PASSWORD\n$USER_PASSWORD" | arch-chroot /mnt passwd $USER_NAME
+  arch-chroot /mnt useradd -m -G wheel,storage,optical -s /bin/bash "$USER_NAME"
+  printf "%s\n%s\n" "$USER_PASSWORD" "$USER_PASSWORD" | arch-chroot /mnt passwd "$USER_NAME"
   sed -i "s/# %wheel ALL=(ALL) ALL/%wheel ALL=(ALL) ALL/" /mnt/etc/sudoers
 
   sed -i 's/GRUB_DEFAULT=0/GRUB_DEFAULT=saved/' /mnt/etc/default/grub
   sed -i "s/#GRUB_SAVEDEFAULT=\"true\"/GRUB_SAVEDEFAULT=\"true\"/" /mnt/etc/default/grub
-  arch-chroot /mnt grub-install --target=x86_64-efi --bootloader-id=grub --efi-directory=$BOOT_MOUNT --recheck
+  arch-chroot /mnt grub-install --target=x86_64-efi --bootloader-id=grub --efi-directory="$BOOT_MOUNT" --recheck
   arch-chroot /mnt grub-mkconfig -o "/boot/grub/grub.cfg"
-  if [ -n "$(lspci | grep -i virtualbox)" ]; then
+  if lspci | grep -q -i virtualbox; then
     echo -n "\EFI\grub\grubx64.efi" >"/mnt$BOOT_MOUNT/startup.nsh"
   fi
 
-  mv alis.sh /mnt/home/$USER_NAME
+  mv alis.sh /mnt/home/"$USER_NAME"
   arch-chroot /mnt sed -i 's/%wheel ALL=(ALL) ALL/%wheel ALL=(ALL) NOPASSWD: ALL/' /etc/sudoers
   arch-chroot /mnt bash -c "echo -e \"$USER_PASSWORD\n\" | su $USER_NAME -c \"cd /home/$USER_NAME && ./alis.sh ${FEATURES[*]}\""
   arch-chroot /mnt sed -i 's/%wheel ALL=(ALL) NOPASSWD: ALL/%wheel ALL=(ALL) ALL/' /etc/sudoers
@@ -148,7 +154,7 @@ USER_PASSWORD="admin"
 BOOT_MOUNT="/boot/efi"
 '
 
-usage="
+usage='
 
 Script for installing Arch Linux and configure applications
 
@@ -159,48 +165,55 @@ options:
     --all-packages        Install all available packages
     --yay                 Install yay, tool for installing packages from AUR
 
-"
+'
+ARGS=( "$@" )
+FEATURES=()
 
-if [[ "$*" =~ "-v" ]]; then
+function remove_el_from_args() {
+  for i in "${!ARGS[@]}"; do
+    if [[ "${ARGS[$i]}" = "$1" ]]; then
+      unset "ARGS[$i]"
+    fi
+  done
+}
+
+if [[ "${ARGS[*]}" =~ -v ]]; then
   set -x
 fi
 
-if [[ "$*" =~ "-h" ]] || [[ "$*" =~ "--help" ]]; then
+if [[ "${ARGS[*]}" =~ -h ]] || [[ "${ARGS[*]}" =~ --help ]]; then
   echo "$usage"
   exit 1
 fi
 
-if [[ "$*" =~ "--generate-defaults" ]]; then
+if [[ "${ARGS[*]}" =~ --generate-defaults ]]; then
   echo "$DEFAULT_OPTIONS" > alis.conf
   echo "File alis.conf was created!"
   exit 1
 fi
 
-if [[ "$*" =~ "--install-arch-uefi" ]]; then
-  FEATURES=()
-  for feature in "$@"
-  do
-    if [ $feature != "--install-arch-uefi" ]; then
-      FEATURES+=($feature)
-    fi
-  done
-  install_arch_uefi ${FEATURES[*]}
+if [[ "${#ARGS[@]}" == 0 ]]; then
+  exit 1
+fi
+
+if [[ "${ARGS[*]}" =~ --install-arch-uefi ]]; then
+  remove_el_from_args --install-arch-uefi
+  install_arch_uefi "${ARGS[@]}"
 else
-  read -p "Password: " -s password
+  read -r -p "Password: " -s password
   echo ""
 
-  FEATURES=()
-  if [[ "$*" =~ "--all-packages" ]]; then
+  if [[ "${ARGS[*]}" =~ --all-packages ]]; then
     FEATURES=(--yay)
   else
-    FEATURES=$@
+    FEATURES=("${ARGS[@]}")
   fi
 
-  for feature in $FEATURES
+  for feature in "${FEATURES[@]}"
   do
     case "$feature" in
       --yay )
-        yay $password
+        yay "$password"
         ;;
     esac
   done
