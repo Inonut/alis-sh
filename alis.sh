@@ -3,6 +3,11 @@ set -e
 
 WARNING="Please run with --generate-defaults option. \nDo needed changes in alis.conf before continue. \nAlso run with --help for more details."
 
+function warning_service() {
+  local service="$1"
+  echo "Warning: $service service will start after reboot!"
+}
+
 function read_variables() {
   local variable_list="$1"
   if [[ ! -f alis.conf ]]; then
@@ -59,7 +64,7 @@ function ssh() {
   { # try
     sudo systemctl start sshd.service
   } || { # catch
-    echo 'Warning: sshd service will start after reboot!'
+    warning_service sshd
   }
 }
 
@@ -69,7 +74,7 @@ function gnome() {
   { # try
     sudo systemctl start gdm.service
   } || { # catch
-    echo 'Warning: gdm service will start after reboot!'
+    warning_service gdm
   }
 }
 

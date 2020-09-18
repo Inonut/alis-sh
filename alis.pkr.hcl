@@ -23,6 +23,7 @@ source "virtualbox-iso" "arch-linux" {
   ssh_username = "${local.ssh_username}"
   ssh_password = "${local.ssh_password}"
   boot_wait = "30s"
+  ssh_timeout = "40m"
   shutdown_command = "sudo systemctl poweroff"
   boot_command = [
     "/usr/bin/curl -O http://{{ .HTTPIP }}:{{ .HTTPPort }}/alis.sh<enter>",
