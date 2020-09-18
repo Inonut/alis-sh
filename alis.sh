@@ -3,6 +3,22 @@ set -e
 
 WARNING="Please run with --generate-defaults option. \nDo needed changes in alis.conf before continue. \nAlso run with --help for more details."
 
+function read_variables() {
+  local variable_list="$1"
+  if [[ ! -f alis.conf ]]; then
+    echo -e "$WARNING"
+    exit 1
+  else
+
+    while IFS= read -r line
+    do
+      if [[ -n "$line" ]] && [[ "$variable_list" =~ $(echo "$line" | awk -v FS='(|=)' '{print $1}') ]]; then
+        eval "$line"
+      fi
+    done < <(grep -v '^ *#' < alis.conf)
+  fi
+}
+
 function last_partition_name() {
   local DEVICE="$1"
   local last_partition
@@ -29,34 +45,48 @@ function last_partition_end_mb() {
 }
 
 function yay() {
-  local PASS="$1"
-  printf "%s\n" "$PASS" | sudo --stdin pacman -S --noconfirm git
+  sudo pacman -S --noconfirm git
   git clone https://aur.archlinux.org/yay.git
   cd yay
-  printf "%s\n" "$PASS" | makepkg -si --noconfirm
+  makepkg -si --noconfirm
   cd ..
   rm -rf yay
 }
 
+function ssh() {
+  sudo pacman -S --noconfirm openssh
+  sudo systemctl enable sshd.service
+  { # try
+    sudo systemctl start sshd.service
+  } || { # catch
+    echo 'Warning: sshd service will start after reboot!'
+  }
+}
+
+function gnome() {
+  sudo pacman -S --noconfirm gnome gnome-extra
+  sudo systemctl enable gdm.service
+  { # try
+    sudo systemctl start gdm.service
+  } || { # catch
+    echo 'Warning: gdm service will start after reboot!'
+  }
+}
+
 function install_arch_uefi() {
-  if [ ! -f alis.conf ]; then
-    echo -e "$WARNING"
-    exit 1
-  else
-
-    while IFS= read -r line
-    do
-      if [ -n "$line" ]; then
-        eval "local $line"
-      fi
-    done < <(grep -v '^ *#' < alis.conf)
-
-    local FEATURES=( "$@" )
-    local SWAPFILE="/swapfile"
-    local PARTITION_OPTIONS="defaults,noatime"
-    local PARTITION_BOOT=""
-    local PARTITION_ROOT=""
-  fi
+  local FEATURES=( "$@" )
+  local SWAPFILE="/swapfile"
+  local PARTITION_OPTIONS="defaults,noatime"
+  local PARTITION_BOOT
+  local PARTITION_ROOT
+  local DEVICE
+  local SWAP_SIZE
+  local HOSTNAME
+  local ROOT_PASSWORD
+  local USER_NAME
+  local USER_PASSWORD
+  local BOOT_MOUNT
+  read_variables "$(declare -p | grep 'declare --' | awk -v FS='(--|=)' '{print $2}')"
 
   loadkeys us
   timedatectl set-ntp true
@@ -136,9 +166,9 @@ function install_arch_uefi() {
   fi
 
   mv alis.sh /mnt/home/"$USER_NAME"
-  arch-chroot /mnt sed -i 's/%wheel ALL=(ALL) ALL/%wheel ALL=(ALL) NOPASSWD: ALL/' /etc/sudoers
-  arch-chroot /mnt bash -c "echo -e \"$USER_PASSWORD\n\" | su $USER_NAME -c \"cd /home/$USER_NAME && ./alis.sh ${FEATURES[*]}\""
-  arch-chroot /mnt sed -i 's/%wheel ALL=(ALL) NOPASSWD: ALL/%wheel ALL=(ALL) ALL/' /etc/sudoers
+  sed -i 's/%wheel ALL=(ALL) ALL/%wheel ALL=(ALL) NOPASSWD: ALL/' /mnt/etc/sudoers
+  arch-chroot /mnt bash -c "su $USER_NAME -c \"cd /home/$USER_NAME && ./alis.sh ${FEATURES[*]}\""
+  sed -i 's/%wheel ALL=(ALL) NOPASSWD: ALL/%wheel ALL=(ALL) ALL/' /mnt/etc/sudoers
 
   umount -R /mnt
 }
@@ -160,10 +190,12 @@ Script for installing Arch Linux and configure applications
 
 options:
     --help                Show this help text
-    --generate-defaults   Generate file alis.conf (!!! DO THIS FIRST !!!)
+    --generate-defaults   Generate file alis.conf
     --install-arch-uefi   Install Arch Linux in uefi mode, this erase all of your data
     --all-packages        Install all available packages
     --yay                 Install yay, tool for installing packages from AUR
+    --ssh                 Configure ssh
+    --gnome               Install gnome as user interface
 
 '
 ARGS=( "$@" )
@@ -200,11 +232,8 @@ if [[ "${ARGS[*]}" =~ --install-arch-uefi ]]; then
   remove_el_from_args --install-arch-uefi
   install_arch_uefi "${ARGS[@]}"
 else
-  read -r -p "Password: " -s password
-  echo ""
-
   if [[ "${ARGS[*]}" =~ --all-packages ]]; then
-    FEATURES=(--yay)
+    FEATURES=(--yay --ssh --gnome)
   else
     FEATURES=("${ARGS[@]}")
   fi
@@ -213,7 +242,13 @@ else
   do
     case "$feature" in
       --yay )
-        yay "$password"
+        yay
+        ;;
+      --ssh )
+        ssh
+        ;;
+      --gnome )
+        gnome
         ;;
     esac
   done
